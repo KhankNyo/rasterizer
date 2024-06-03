@@ -1,5 +1,6 @@
 
  *.exe
+ *.obj
  .cache 
  compile_commands.json
 
