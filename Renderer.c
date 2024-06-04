@@ -150,8 +150,8 @@ static void App_Draw3DHorizontalSideTriangle(
     float LeftRightSlope = Width / Height;
     float DeltaLeft = DwLeft / Height;
 
-    float DeltaZ_AB = (A.z - B.z) / (YEnd - YStart + 1);
-    float DeltaZ_AC = (A.z - C.z) / (YEnd - YStart + 1);
+    float DeltaZ_AB = (B.z - A.z) / (YEnd - YStart + 1);
+    float DeltaZ_AC = (C.z - A.z) / (YEnd - YStart + 1);
     float Z_AB = A.z;
     float Z_AC = A.z;
     if (YStart < YEnd)
@@ -162,8 +162,8 @@ static void App_Draw3DHorizontalSideTriangle(
         XBegin = B.x;
         Len = Width;
 
-        DeltaZ_AB = (-A.z + B.z) / (YEnd - YStart + 1);
-        DeltaZ_AC = (-A.z + C.z) / (YEnd - YStart + 1);
+        DeltaZ_AB = (B.z - A.z) / (YEnd - YStart + 1);
+        DeltaZ_AC = (C.z - A.z) / (YEnd - YStart + 1);
         Z_AB = B.z;
         Z_AC = C.z;
     }
@@ -217,12 +217,12 @@ static void App_Draw3DTriangle(renderer_context *Context, v3f A, v3f B, v3f C, u
         SWAP(v3f, B, C);
     /* C is now the bottom most point */
 
-    int Dy = A.y - C.y;
-    int Dx = A.x - C.x;
-    if (Dy == 0)
+    float Dy = (A.y - C.y);
+    if (Roundf(Dy) == 0)
     {
         return;
     }
+    float Dx = (A.x - C.x);
     
     v3f M = {
         .x = C.x + (B.y - C.y) / Dy * Dx,
@@ -774,8 +774,8 @@ void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
                 .y = Model->Vertices[CurrentFace.Index[j] - 1].y,
                 .z = Model->Vertices[CurrentFace.Index[j] - 1].z,
             };
-            Triangle[j].x = (Triangle[j].x + 1) * RenderContext->Width * .5;
-            Triangle[j].y = (Triangle[j].y + 1) * RenderContext->Height * .5;
+            Triangle[j].x = (Triangle[j].x + 1.0) * RenderContext->Width * .5;
+            Triangle[j].y = (Triangle[j].y + 1.0) * RenderContext->Height * .5;
         }
 
         App_Draw3DTriangle(RenderContext, 
