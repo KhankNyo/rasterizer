@@ -1,6 +1,5 @@
 
- main.exe
- .cache/
- compile_commands.json
- random
+*.exe
+.cache/
+compile_commands.json
 
