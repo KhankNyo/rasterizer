@@ -76,9 +76,14 @@ typedef struct
     renderer_context RenderContext;
 
     v3f Light;
-    double LightMoveStart;
-    double LightMoveDelta;
-    double LightDeltaX;
+    float LightMoveStart;
+    float LightMoveDelta;
+    float LightDeltaX;
+
+    double RenderTime;
+    double LogStart, LogInterval;
+    double FrameCount;
+    double CumulativeRenderTime;
 } app_state;
 
 app_state App_OnStartup(void);

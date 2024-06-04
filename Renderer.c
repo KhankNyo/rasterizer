@@ -1,4 +1,5 @@
 
+#include <stdio.h>
 #include <string.h> /* memcpy */
 #include <math.h>   /* pow */
 #include <float.h>  /* FLT_MIN */
@@ -39,7 +40,16 @@ static u32 RGBColor(u8 R, u8 G, u8 B)
 
 static int Roundf(float f)
 {
-    return roundf(f);
+    return (int)(f + .5);
+}
+
+static float Recip(float f)
+{
+    __m128 Vec = _mm_set_ss(f*f);
+    __m128 Inv = _mm_rsqrt_ss(Vec);
+    float Result;
+    _mm_store_ss(&Result, Inv);
+    return Result;
 }
 
 static void App_DrawLine(renderer_context *Context, int x0, int y0, int x1, int y1, u32 Color)
@@ -132,61 +142,56 @@ static void App_DrawHorizontalLine(renderer_context *Context, int x0, int y, int
 
 
 /* A is the pointy end, B and C are base points */
-static void App_Draw3DHorizontalSideTriangle(
+void App_Draw3DHorizontalSideTriangle(
     renderer_context *Context, 
     v3f A, v3f B, v3f C,
     u32 Color)
 {
     int YStart = Roundf(A.y);
-    int YEnd = Roundf(B.y);
+    int YEnd = Roundf(C.y);
     float Height = A.y - C.y;
-    float Width = C.x - B.x;
-    if (Roundf(Height) == 0 || Roundf(Width) == 0)
+    if (Roundf(Height) == 0)
         return;
 
     float XBegin = A.x;
-    float DwLeft = A.x - B.x;
-    float Len = 0;
-    float LeftRightSlope = Width / Height;
-    float DeltaLeft = DwLeft / Height;
+    float XEnd = A.x;
+    float DeltaLeft = (A.x - B.x) / Height;
+    float DeltaRight = (C.x - A.x) / Height;
 
-    float DeltaZ_AB = (B.z - A.z) / (YEnd - YStart + 1);
-    float DeltaZ_AC = (C.z - A.z) / (YEnd - YStart + 1);
+    float DeltaZ_AB = (B.z - A.z) / (Height + 1);
+    float DeltaZ_AC = (C.z - A.z) / (Height + 1);
     float Z_AB = A.z;
     float Z_AC = A.z;
     if (YStart < YEnd)
     {
         SWAP(int, YStart, YEnd);
-        Height = -Height;
-        DwLeft = -DwLeft;
         XBegin = B.x;
-        Len = Width;
+        XEnd = C.x;
 
-        DeltaZ_AB = (B.z - A.z) / (YEnd - YStart + 1);
-        DeltaZ_AC = (C.z - A.z) / (YEnd - YStart + 1);
         Z_AB = B.z;
         Z_AC = C.z;
     }
 
+    float Width = Context->Width;
     for (int y = YStart; y >= YEnd; y--)
     {
-        float XEnd = XBegin + Len;
-        if (XBegin >= (float)Context->Width || XEnd < 0 || y >= (int)Context->Height || y < 0)
+        if (XBegin >= Width || XEnd < 0 || y >= (int)Context->Height || y < 0)
             continue;
 
-        if (XEnd > (float)Context->Width)
-            XEnd = Context->Width;
+        if (XEnd > Width)
+            XEnd = Width;
         if (XBegin < 0)
             XBegin = 0;
 
-        float YIndex = y*Context->Width;
-        int Start = Roundf(YIndex + XBegin);
-        int End = Roundf(YIndex + XEnd);
+        int YIndex = y * Context->Width;
+        int Start = YIndex + Roundf(XBegin);
+        int End = YIndex + Roundf(XEnd);
         if (Start > End)
         {
             SWAP(int, Start, End);
         }
-        float Dz = (Z_AB - Z_AC) / (Len + 1);
+        float Len = XEnd - XBegin + 1;
+        float Dz = (Z_AB - Z_AC) * Recip(Len);
         float z = Z_AC;
         Z_AB += DeltaZ_AB;
         Z_AC += DeltaZ_AC;
@@ -201,7 +206,7 @@ static void App_Draw3DHorizontalSideTriangle(
             z += Dz;
         }
 
-        Len += LeftRightSlope;
+        XEnd += DeltaRight;
         XBegin -= DeltaLeft;
     }
 }
@@ -217,17 +222,18 @@ static void App_Draw3DTriangle(renderer_context *Context, v3f A, v3f B, v3f C, u
         SWAP(v3f, B, C);
     /* C is now the bottom most point */
 
-    float Dy = (A.y - C.y);
-    if (Roundf(Dy) == 0)
-    {
-        return;
-    }
-    float Dx = (A.x - C.x);
+    float Dy = A.y - C.y;
+    float Dx = A.x - C.x;
+    float Dz = A.z - C.z;
     
     v3f M = {
-        .x = C.x + (B.y - C.y) / Dy * Dx,
+        .x = Roundf(Dy) == 0
+            ? C.x 
+            : C.x + (B.y - C.y) / Dy * Dx,
         .y = B.y,
-        .z = (B.z - C.z) / (A.z - C.z) + C.z,
+        .z = Roundf(Dz) == 0
+            ? C.z
+            : (B.z - C.z) / Dz + C.z,
     };
 
     App_Draw3DHorizontalSideTriangle(
@@ -666,10 +672,14 @@ app_state App_OnStartup(void)
 {
     return (app_state) {
         .RandState = Platform_GetTimeMillisec(),
+
         .Light = {0, 0, -1},
         .LightMoveStart = Platform_GetTimeMillisec(),
         .LightMoveDelta = 1000.0 / 30.0,
         .LightDeltaX = 0.05,
+
+        .LogStart = 0,
+        .LogInterval = 500,
     };
 }
 
@@ -727,25 +737,43 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
 
         Model->ColorIsValid = true;
     }
+
+    double LogCheckTime = Platform_GetTimeMillisec();
+    if (LogCheckTime - AppState->LogStart > AppState->LogInterval)
+    {
+        if (AppState->Model.FaceCount)
+        {
+            printf("\rRender time: %2.3f ms, potential FPS: %2.2f, "
+                    "avg: %2.3fms, %2.2ffps (%g frames)\t\t",
+                AppState->RenderTime, 1000.0 / AppState->RenderTime,
+                AppState->CumulativeRenderTime / AppState->FrameCount,
+                AppState->FrameCount * 1000 / AppState->CumulativeRenderTime,
+                AppState->FrameCount
+            );
+        }
+        AppState->LogStart = LogCheckTime;
+    }
 }
 
 void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
 {
+    double RenderTimeStart = Platform_GetTimeMillisec();
+
     renderer_context *RenderContext = &AppState->RenderContext;
     RenderContext->Width = Width;
     RenderContext->Height = Height;
     RenderContext->Buffer = Buffer;
 
     App_SetBgColor(RenderContext, RGBColor(0, 0, 0));
-    
+
     obj_model *Model = &AppState->Model;
     for (u32 i = 0; i < Model->FaceCount; i++)
     {
+#if 0
         /* black face culling */
         if (0 == Model->Colors[i])
             continue;
 
-#if 0
         Face CurrentFace = Model->Faces[i];
         v2i Triangle[3];
         for (int j = 0; j < 3; j++)
@@ -790,6 +818,13 @@ void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
     RenderContext->Width = 0;;
     RenderContext->Height = 0;
     RenderContext->Buffer = NULL;
+
+    AppState->RenderTime = Platform_GetTimeMillisec() - RenderTimeStart;
+    if (Model->FaceCount)
+    {
+        AppState->CumulativeRenderTime += AppState->RenderTime;
+        AppState->FrameCount += 1;
+    }
 }
 
 
