@@ -1,0 +1,21 @@
+gcc -Ofast -mavx2 -mfma
+Render time: 3.810 ms, potential FPS: 262.47, avg: 3.153ms, 317.14fps (4929 frames)
+Render time: 3.703 ms, potential FPS: 270.04, avg: 3.085ms, 324.17fps (5847 frames)
+Render time: 2.920 ms, potential FPS: 342.48, avg: 3.101ms, 322.47fps (2554 frames)
+
+gcc -flto -Ofast -mavx -mfma
+Render time: 3.066 ms, potential FPS: 326.17, avg: 2.809ms, 355.96fps (5138 frames)
+Render time: 2.491 ms, potential FPS: 401.51, avg: 2.726ms, 366.86fps (10014 frames)
+Render time: 2.554 ms, potential FPS: 391.50, avg: 2.693ms, 371.38fps (10027 frames)
+
+(vectorized)
+gcc -flto -Ofast -mavx -mfma
+Render time: 2.883 ms, potential FPS: 346.87, avg: 2.745ms, 364.32fps (5456 frames)
+Render time: 2.489 ms, potential FPS: 401.75, avg: 2.680ms, 373.08fps (10954 frames)
+Render time: 2.968 ms, potential FPS: 336.95, avg: 2.731ms, 366.11fps (5538 frames)
+
+Render time: 2.727 ms, potential FPS: 366.73, avg: 2.707ms, 369.40fps (5628 frames)
+Render time: 2.445 ms, potential FPS: 409.01, avg: 2.689ms, 371.89fps (10872 frames)
+Render time: 2.682 ms, potential FPS: 372.80, avg: 2.726ms, 366.85fps (6227 frames)
+
+
