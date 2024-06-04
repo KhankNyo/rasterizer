@@ -1,6 +1,5 @@
 
- *.exe
- *.obj
- .cache 
+ main.exe
+ .cache\
  compile_commands.json
 

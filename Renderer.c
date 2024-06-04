@@ -1,7 +1,7 @@
 
 #include <string.h> /* memcpy */
-#include <math.h> /* pow */
-#include <float.h> /* FLT_MIN */
+#include <math.h>   /* pow */
+#include <float.h>  /* FLT_MIN */
 
 #include <immintrin.h>
 #include "Common.h"
@@ -30,7 +30,6 @@ static v3f V3f_Sub(v3f A, v3f B);
 static v3f V3f_CrossProd(v3f A, v3f B);
 static v3f V3f_Normalize(v3f Vec);
 static float V3f_DotProd(v3f A, v3f B);
-static v3f V3f_GetBary(v3f Point, v3f A, v3f B, v3f C);
 
 
 static u32 RGBColor(u8 R, u8 G, u8 B)
@@ -38,9 +37,9 @@ static u32 RGBColor(u8 R, u8 G, u8 B)
     return (u32)R << 16 | (u32)G << 8 | B;
 }
 
-static int Round(float n)
+static int Roundf(float f)
 {
-    return round(n);
+    return roundf(f);
 }
 
 static void App_DrawLine(renderer_context *Context, int x0, int y0, int x1, int y1, u32 Color)
@@ -138,11 +137,11 @@ static void App_Draw3DHorizontalSideTriangle(
     v3f A, v3f B, v3f C,
     u32 Color)
 {
-    int YStart = Round(A.y);
-    int YEnd = Round(B.y);
+    int YStart = Roundf(A.y);
+    int YEnd = Roundf(B.y);
     float Height = A.y - C.y;
     float Width = C.x - B.x;
-    if (Round(Height) == 0 || Round(Width) == 0)
+    if (Roundf(Height) == 0 || Roundf(Width) == 0)
         return;
 
     float XBegin = A.x;
@@ -150,13 +149,23 @@ static void App_Draw3DHorizontalSideTriangle(
     float Len = 0;
     float LeftRightSlope = Width / Height;
     float DeltaLeft = DwLeft / Height;
+
+    float DeltaZ_AB = (A.z - B.z) / (YEnd - YStart + 1);
+    float DeltaZ_AC = (A.z - C.z) / (YEnd - YStart + 1);
+    float Z_AB = A.z;
+    float Z_AC = A.z;
     if (YStart < YEnd)
     {
         SWAP(int, YStart, YEnd);
         Height = -Height;
         DwLeft = -DwLeft;
-        XBegin = Round(B.x);
+        XBegin = B.x;
         Len = Width;
+
+        DeltaZ_AB = (-A.z + B.z) / (YEnd - YStart + 1);
+        DeltaZ_AC = (-A.z + C.z) / (YEnd - YStart + 1);
+        Z_AB = B.z;
+        Z_AC = C.z;
     }
 
     for (int y = YStart; y >= YEnd; y--)
@@ -171,27 +180,25 @@ static void App_Draw3DHorizontalSideTriangle(
             XBegin = 0;
 
         float YIndex = y*Context->Width;
-        int Start = Round(YIndex + XBegin);
-        int End = Round(YIndex + XEnd);
+        int Start = Roundf(YIndex + XBegin);
+        int End = Roundf(YIndex + XEnd);
         if (Start > End)
         {
             SWAP(int, Start, End);
         }
-        v3f Point = {.x = XBegin, .y = y};
+        float Dz = (Z_AB - Z_AC) / (Len + 1);
+        float z = Z_AC;
+        Z_AB += DeltaZ_AB;
+        Z_AC += DeltaZ_AC;
 
         for (int i = Start; i <= End; i++)
         {
-            v3f Bary = V3f_GetBary(Point, A, B, C);
-            if (Bary.x < 0 || Bary.y < 0 || Bary.z < 0) 
-                continue;
-            Point.z = 0;
-            Point.z = A.z*Bary.x + B.z*Bary.y + C.z*Bary.z;
-            int Index = Point.x + Point.y*Context->Width;
-            if (Context->ZBuffer[Index] < Point.z)
+            if (z > Context->ZBuffer[i])
             {
-                Context->ZBuffer[Index] = Point.z;
-                Context->Buffer[Index] = Color;
+                Context->ZBuffer[i] = z;
+                Context->Buffer[i] = Color;
             }
+            z += Dz;
         }
 
         Len += LeftRightSlope;
@@ -289,7 +296,7 @@ static void App_Draw2DTriangle(renderer_context *Context, v2i A, v2i B, v2i C, u
     //    C
     v2i M = {
         .y = B.y,
-        .x = Round((float)C.x + (float)(B.y - C.y) / (float)Dy * Dx),
+        .x = Roundf(C.x + (B.y - C.y) / (float)Dy * Dx),
     };
 
 
@@ -305,7 +312,7 @@ static void App_Draw2DTriangle(renderer_context *Context, v2i A, v2i B, v2i C, u
     float Len = 0;
     for (int y = A.y; y > M.y; y--)
     {
-        App_DrawHorizontalLine(Context, Round(x), y, Round(x + Len), Color);
+        App_DrawHorizontalLine(Context, Roundf(x), y, Roundf(x + Len), Color);
         Len += LeftRightSlope;
         x -= DeltaLeft;
     }
@@ -320,7 +327,7 @@ static void App_Draw2DTriangle(renderer_context *Context, v2i A, v2i B, v2i C, u
     Len = Width;
     for (int y = M.y; y >= C.y; y--)
     {
-        App_DrawHorizontalLine(Context, Round(x), y, Round(x + Len), Color);
+        App_DrawHorizontalLine(Context, Roundf(x), y, Roundf(x + Len), Color);
         Len += LeftRightSlope;
         x -= DeltaLeft;
     }
@@ -335,9 +342,8 @@ static void App_Draw2DTriangle(renderer_context *Context, v2i A, v2i B, v2i C, u
 
 static void App_SetBgColor(renderer_context *Context, u32 Color)
 {
-
+    u32 BufferSize = Context->Width*Context->Height;
     {
-        u32 BufferSize = Context->Width*Context->Height;
         u32 *Ptr = Context->Buffer;
         u32 i = 0; 
         while ((uintptr_t)Ptr % 32 && i < BufferSize)
@@ -371,14 +377,14 @@ static void App_SetBgColor(renderer_context *Context, u32 Color)
 
         float *Ptr = Context->ZBuffer;
         uSize i = 0;
-        while (i < BufferSize && (uintptr_t)Ptr % 32)
+        while ((uintptr_t)Ptr % 32 && i < BufferSize)
         {
-            *Ptr++ = FLT_MIN;
+            *Ptr++ = -FLT_MAX;
             i++;
         }
         BufferSize -= i;
 
-        __m256 MinVec = _mm256_set1_ps(FLT_MIN);
+        __m256 MinVec = _mm256_set1_ps(-FLT_MAX);
         for (uSize i = 0; i < BufferSize; i += 8)
         {
             _mm256_store_ps(Ptr, MinVec);
@@ -410,7 +416,7 @@ static int App_ParseInt(const char *Str, int Len, int *OutIndex)
     return Neg? -Ret : Ret;
 }
 
-static float App_ParseDouble(const char *Str, int Len, int *OutIndex)
+static float App_ParseFloat(const char *Str, int Len, int *OutIndex)
 {
     float Ret = 0;
     if (Len == 0)
@@ -504,7 +510,7 @@ static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileS
                 i += App_SkipSpace(File + i, FileSize - i);
 
                 int Len;
-                Vec.Index[j] = App_ParseDouble(File + i, FileSize - i, &Len);
+                Vec.Index[j] = App_ParseFloat(File + i, FileSize - i, &Len);
                 if (Vec.Index[j] > 1)
                 {
                     i += Len - 1 + 1.0;
@@ -655,26 +661,6 @@ static float V3f_DotProd(v3f A, v3f B)
     return A.x*B.x + A.y*B.y + A.z*B.z;
 }
 
-static v3f V3f_GetBary(v3f Point, v3f A, v3f B, v3f C)
-{
-    v3f Bary = { 0 };
-    v3f Normal = V3f_CrossProd(
-        V3f_Sub(A, B),
-        V3f_Sub(C, B)
-    );
-    Normal = V3f_Normalize(Normal);
-
-    // The Area of a triangle is 
-    float AreaABC = V3f_DotProd(Normal, V3f_CrossProd( V3f_Sub(B, A), V3f_Sub(C, A) )) ;
-    float AreaPBC = V3f_DotProd(Normal, V3f_CrossProd( V3f_Sub(B, Point), V3f_Sub(C, Point) )  ) ;
-    float AreaPCA = V3f_DotProd(Normal, V3f_CrossProd( V3f_Sub(C, Point), V3f_Sub(A, Point) )  ) ;
-
-    Bary.x = AreaPBC / AreaABC ; // alpha
-    Bary.y = AreaPCA / AreaABC ; // beta
-    Bary.z = 1.0f - Bary.x - Bary.y ; // gamma
-    return Bary;
-}
-
 
 app_state App_OnStartup(void)
 {
@@ -759,7 +745,7 @@ void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
         if (0 == Model->Colors[i])
             continue;
 
-#if 1
+#if 0
         Face CurrentFace = Model->Faces[i];
         v2i Triangle[3];
         for (int j = 0; j < 3; j++)

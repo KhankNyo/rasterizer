@@ -21,7 +21,6 @@ typedef struct win32_window_creation_args
 
 typedef struct platform_state 
 {
-
     HWND WindowManager,
          MainWindow;
 
