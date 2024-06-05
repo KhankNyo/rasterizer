@@ -34,9 +34,9 @@ void *Platform_AllocateMemory(uSize SizeBytes);
 
 typedef union v3i
 {
-    int Index[3];
+    int Index[4];
     struct {
-        int x, y, z;
+        int x, y, z, Dummy;
     };
 } Face, v3i;
 typedef union v3f
@@ -81,9 +81,11 @@ typedef struct
     float LightDeltaX;
 
     double RenderTime;
+    double FrameTime, FrameTimeStart;
     double LogStart, LogInterval;
     double FrameCount;
     double CumulativeRenderTime;
+    double CumulativeFrameTime;
 } app_state;
 
 app_state App_OnStartup(void);

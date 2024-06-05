@@ -13,7 +13,9 @@
 #define APP_RAND(app_state_ptr) \
     ((((app_state_ptr)->RandState = (214013*(app_state_ptr)->RandState + 2531011)) >> 16) & 0x7FFF)
 #define TRIANGLE_DBG 0
-
+#define SSE_ALIGN __attribute__((aligned(16)))
+#define AVX_ALIGN __attribute__((aligned(32)))
+#define FORCE_INLINE __attribute__((always_inline)) inline
 
 typedef union v2i 
 {
@@ -28,9 +30,9 @@ typedef union v2i
 
 
 static v3f V3f_Sub(v3f A, v3f B);
-static v3f V3f_CrossProd(v3f A, v3f B);
+static v3f V3f_NormalizedCrossProd(v3f A, v3f B);
 static v3f V3f_Normalize(v3f Vec);
-static float V3f_DotProd(v3f A, v3f B);
+float V3f_DotProd(v3f A, v3f B);
 
 
 static u32 RGBColor(u8 R, u8 G, u8 B)
@@ -38,19 +40,18 @@ static u32 RGBColor(u8 R, u8 G, u8 B)
     return (u32)R << 16 | (u32)G << 8 | B;
 }
 
-static int Roundf(float f)
+static FORCE_INLINE int Roundf(float f)
 {
     return (int)(f + .5);
 }
 
-static float Recip(float f)
+static FORCE_INLINE float Recip(float f)
 {
-    __m128 Vec = _mm_set_ss(f*f);
-    __m128 Inv = _mm_rsqrt_ss(Vec);
-    float Result;
-    _mm_store_ss(&Result, Inv);
-    return Result;
+    __m128 v = _mm_load_ss(&f);
+    _mm_store_ss(&f, _mm_rcp_ss(v));
+    return f;
 }
+
 
 static void App_DrawLine(renderer_context *Context, int x0, int y0, int x1, int y1, u32 Color)
 {
@@ -142,24 +143,43 @@ static void App_DrawHorizontalLine(renderer_context *Context, int x0, int y, int
 
 
 /* A is the pointy end, B and C are base points */
-void App_Draw3DHorizontalSideTriangle(
+static void App_Draw3DHorizontalSideTriangle(
     renderer_context *Context, 
-    v3f A, v3f B, v3f C,
+    v3i A, v3i B, v3i C,
     u32 Color)
 {
-    int YStart = Roundf(A.y);
-    int YEnd = Roundf(C.y);
-    float Height = A.y - C.y;
-    if (Roundf(Height) == 0)
-        return;
+    int YStart = A.y;
+    int YEnd = C.y;
+    int Height = A.y - C.y;
+    if (Height == 0)
+        Height = 1;
 
+    float Heightf = Height;
     float XBegin = A.x;
     float XEnd = A.x;
-    float DeltaLeft = (A.x - B.x) / Height;
-    float DeltaRight = (C.x - A.x) / Height;
 
-    float DeltaZ_AB = (B.z - A.z) / (Height + 1);
-    float DeltaZ_AC = (C.z - A.z) / (Height + 1);
+    float DeltaLeft;
+    float DeltaRight;
+    float DeltaZ_AB; 
+    float DeltaZ_AC;
+    {
+        float Out[4];
+        __m128 Tmp = _mm_set_ps(
+            A.x - B.x, 
+            C.x - A.x, 
+            B.z - A.z, 
+            C.z - A.z
+        );
+        __m128 HeightfVec = _mm_set1_ps(Heightf);
+        __m128 Result = _mm_mul_ps(Tmp, _mm_rcp_ps(HeightfVec)); /* divide individual values by Heightf */
+        _mm_store_ps(Out, Result);
+
+        DeltaLeft = Out[3];
+        DeltaRight = Out[2];
+        DeltaZ_AB = Out[1];
+        DeltaZ_AC = Out[0];
+    }
+
     float Z_AB = A.z;
     float Z_AC = A.z;
     if (YStart < YEnd)
@@ -173,7 +193,11 @@ void App_Draw3DHorizontalSideTriangle(
     }
 
     float Width = Context->Width;
-    for (int y = YStart; y >= YEnd; y--)
+    for (int y = YStart;
+        y >= YEnd; 
+        y--, 
+        XEnd += DeltaRight, 
+        XBegin -= DeltaLeft)
     {
         if (XBegin >= Width || XEnd < 0 || y >= (int)Context->Height || y < 0)
             continue;
@@ -191,12 +215,13 @@ void App_Draw3DHorizontalSideTriangle(
             SWAP(int, Start, End);
         }
         float Len = XEnd - XBegin + 1;
-        float Dz = (Z_AB - Z_AC) * Recip(Len);
+        float RecipLen = Recip(Len);
+        float Dz = Z_AB*RecipLen - Z_AC*RecipLen;
         float z = Z_AC;
         Z_AB += DeltaZ_AB;
         Z_AC += DeltaZ_AC;
 
-        for (int i = Start; i <= End; i++)
+        for (int i = Start; i <= End; i += 1)
         {
             if (z > Context->ZBuffer[i])
             {
@@ -205,35 +230,44 @@ void App_Draw3DHorizontalSideTriangle(
             }
             z += Dz;
         }
-
-        XEnd += DeltaRight;
-        XBegin -= DeltaLeft;
     }
 }
 
-static void App_Draw3DTriangle(renderer_context *Context, v3f A, v3f B, v3f C, u32 Color)
+static void App_Draw3DTriangle(renderer_context *Context, v3i A, v3i B, v3i C, u32 Color)
 {
     if (B.y > A.y)
-        SWAP(v3f, A, B);
+        SWAP(v3i, A, B);
     if (C.y > A.y)
-        SWAP(v3f, A, C);
+        SWAP(v3i, A, C);
     /* A is now the topmost point */
     if (B.y < C.y)
-        SWAP(v3f, B, C);
+        SWAP(v3i, B, C);
     /* C is now the bottom most point */
 
-    float Dy = A.y - C.y;
-    float Dx = A.x - C.x;
-    float Dz = A.z - C.z;
+    int Dy = A.y - C.y;
+    int Dx = A.x - C.x;
+    int Dz = A.z - C.z;
+
+    float Mx = C.x;
+    if (Dy != 0)
+    {
+        float DxDy = Dx * Recip(Dy);
+        Mx += B.y*DxDy - C.y*DxDy; /* allow the compiler to use fma */
+        //Mx += (B.y - C.y) * Recip(Dy) * Dx;
+    }
+
+    float Mz = C.z;
+    if (Dz != 0)
+    {
+        float RecipDz = Recip(Dz);
+        Mz += B.z*RecipDz - C.z*RecipDz; /* allow the compiler to use fma */
+        //Mz += (B.z - C.z)*RecipDz;
+    }
     
-    v3f M = {
-        .x = Roundf(Dy) == 0
-            ? C.x 
-            : C.x + (B.y - C.y) / Dy * Dx,
+    v3i M = {
+        .x = Roundf(Mx), 
         .y = B.y,
-        .z = Roundf(Dz) == 0
-            ? C.z
-            : (B.z - C.z) / Dz + C.z,
+        .z = Roundf(Mz),
     };
 
     App_Draw3DHorizontalSideTriangle(
@@ -241,11 +275,14 @@ static void App_Draw3DTriangle(renderer_context *Context, v3f A, v3f B, v3f C, u
         A, B, M,
         Color
     );
+    B.y -= 1;
+    M.y -= 1;
     App_Draw3DHorizontalSideTriangle(
         Context,
         C, B, M,
         Color
     );
+    
 
 #if TRIANGLE_DBG
     u32 DbgColor = RGBColor(0x80, 0x80, 0);
@@ -282,7 +319,7 @@ static void App_Draw2DTriangle(renderer_context *Context, v2i A, v2i B, v2i C, u
             SWAP(v2i, B, C);
         /* C is now the rightmost point */
             
-        App_DrawLine(Context, A.x, A.y, B.x, B.y, Color);
+        App_DrawHorizontalLine(Context, A.x, A.y, B.x, Color);
         return;
     }
 
@@ -609,22 +646,33 @@ static v3f V3f_Sub(v3f A, v3f B)
 }
 
 /* compute A x B */
-static v3f V3f_CrossProd(v3f A, v3f B)
+static v3f V3f_NormalizedCrossProd(v3f A, v3f B)
 {
     __m128 VecA = _mm_load_ps(A.Index);
     __m128 VecB = _mm_load_ps(B.Index);
 
     __m128 A_yzx = _mm_shuffle_ps(VecA, VecA, 0x09);    /* [Ay, Az, Ax, XX] */
     __m128 B_zxy = _mm_shuffle_ps(VecB, VecB, 0x12);    /* [Bz, Bx, By, XX] */
-    __m128 A_zxy = _mm_shuffle_ps(VecA, VecA, 0x12);
-    __m128 B_yzx = _mm_shuffle_ps(VecB, VecB, 0x09);
-    __m128 CrossProduct = _mm_fmsub_ps( 
+    __m128 A_zxy = _mm_shuffle_ps(VecA, VecA, 0x12);    /* [Az, Ax, Ay, XX] */
+    __m128 B_yzx = _mm_shuffle_ps(VecB, VecB, 0x09);    /* [By, Bz, Bx, XX] */
+
+    __m128 CrossProduct = _mm_fmsub_ps(                 /* [CrossProd vec] */
         A_yzx, B_zxy, 
         _mm_mul_ps(A_zxy, B_yzx)
     );
 
+    __m128 v2 = _mm_mul_ps(CrossProduct, CrossProduct); /* CrossProd vec^2 */
+    __m128 x = _mm_shuffle_ps(CrossProduct, CrossProduct, 0x00);    /* distribute x */
+    __m128 y = _mm_shuffle_ps(CrossProduct, CrossProduct, 0x55);    /* distribute y */
+    __m128 z2 = _mm_shuffle_ps(v2, v2, 0xAA);                       /* get z^2 from crossprod */
+    __m128 Tmp = _mm_fmadd_ps(x, x, z2);                            /* sum x^2 and z^2 */
+    __m128 Sum = _mm_fmadd_ps(y, y, Tmp);                           /* sum that with y^2 */
+
+    __m128 RecipMag = _mm_rsqrt_ps(Sum);
+    __m128 ResultVec = _mm_mul_ps(CrossProduct, RecipMag);
+
     v3f Result;
-    _mm_store_ps(Result.Index, CrossProduct);
+    _mm_store_ps(Result.Index, ResultVec);
     return Result;
 }
 
@@ -634,25 +682,12 @@ static v3f V3f_Normalize(v3f Vec)
 
     /* compute Mag */
     __m128 v2 = _mm_mul_ps(v, v);                       /* [x2,           y2,         z2,   0] */
-    /* TODO: benchmark */
-#if 1
-    /* 11 cycles: 3 x shufps(1) + 2 x addps(4) */
-    /* note that the CPI of addps is .5, meaning it can take 2 instructions per clock, 
-     * but those adds are not independent of each other, 
-     * so they have to be performed in program order */
-    /* also note that for newer mainstream cpu (>= 10th gen Intel, any AMD Zen), 
-     * shufps is even faster here because it has a CPI of .5 */
-    /* https://www.agner.org/optimize/instruction_tables.pdf */
+
     __m128 x2 = _mm_shuffle_ps(v2, v2, 0x00);           /* [x2,           x2,         x2,   x2] */
     __m128 y2 = _mm_shuffle_ps(v2, v2, 0x55);           /* [y2,           y2,         y2,   y2] */
     __m128 z2 = _mm_shuffle_ps(v2, v2, 0xAA);           /* [z2,           z2,         z2,   z2] */
     __m128 Tmp = _mm_add_ps(x2, y2);
     __m128 Sum = _mm_add_ps(Tmp, z2);                   /* [Sum,         Sum,        Sum,  Sum] */
-#else
-    /* 14 cycles: 2 x haddps(7) */
-    __m128 Tmp = _mm_hadd_ps(v2, v2);                   /* [x2 + y2,      z2,    x2 + y2,   z2] */
-    __m128 Sum = _mm_hadd_ps(Tmp, Tmp);                 /* [Sum,         Sum,        Sum,  Sum] = x2 + y2 + z2 */
-#endif
 
     __m128 InvSqrt = _mm_rsqrt_ps(Sum);                 /* [Ret,         Ret,        Ret,  Ret] = 1/sqrt(Sum) */
     __m128 Normal = _mm_mul_ps(v, InvSqrt);
@@ -662,9 +697,24 @@ static v3f V3f_Normalize(v3f Vec)
     return Ret;
 }
 
-static float V3f_DotProd(v3f A, v3f B)
+float V3f_DotProd(v3f A, v3f B)
 {
+#if 1
     return A.x*B.x + A.y*B.y + A.z*B.z;
+#else
+    float Result;
+    __m128 VecA = _mm_load_ps(A.Index);
+    __m128 VecB = _mm_load_ps(B.Index);
+    __m128 ABx = _mm_mul_ss(VecA, VecB);
+    __m128 Ay = _mm_shuffle_ps(VecA, VecA, 1);
+    __m128 By = _mm_shuffle_ps(VecB, VecB, 1);
+    __m128 Az = _mm_shuffle_ps(VecA, VecA, 2);
+    __m128 Bz = _mm_shuffle_ps(VecB, VecB, 2);
+    __m128 ABxy = _mm_fmadd_ps(Ay, By, ABx);
+    __m128 DotProduct = _mm_fmadd_ps(Az, Bz, ABxy);
+    _mm_store_ss(&Result, DotProduct);
+    return Result;
+#endif
 }
 
 
@@ -707,26 +757,18 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
             {
                 Triangle[j] = Model->Vertices[Model->Faces[i].Index[j] - 1];
             }
-            v3f NormalToTriangle = 
-                V3f_CrossProd(
-                    V3f_Sub(Triangle[2], Triangle[0]),
-                    V3f_Sub(Triangle[1], Triangle[0])
-                );
-            NormalToTriangle = V3f_Normalize(NormalToTriangle);
+            v3f NormalToTriangle = V3f_NormalizedCrossProd(
+                V3f_Sub(Triangle[2], Triangle[0]),
+                V3f_Sub(Triangle[1], Triangle[0])
+            );
+            //NormalToTriangle = V3f_Normalize(NormalToTriangle);
 
             float Intensity = V3f_DotProd(NormalToTriangle, AppState->Light);
             if (Intensity > 0)
             {
-                /* rand must be called 3 times to get distinct random values */
-#if 0
-                u32 R = (u8)(Intensity * (APP_RAND(AppState) & 0xFF));
-                u32 G = (u8)(Intensity * (APP_RAND(AppState) & 0xFF));
-                u32 B = (u8)(Intensity * (APP_RAND(AppState) & 0xFF));
-#else
                 u32 R = (u8)(Intensity * 0xFF);
                 u32 G = R;
                 u32 B = R;
-#endif 
                 Model->Colors[i] = RGBColor(R, G, B);
             }
             else
@@ -743,12 +785,14 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
     {
         if (AppState->Model.FaceCount)
         {
-            printf("\rRender time: %2.3f ms, potential FPS: %2.2f, "
-                    "avg: %2.3fms, %2.2ffps (%g frames)\t\t",
-                AppState->RenderTime, 1000.0 / AppState->RenderTime,
+            printf("\rFrame time: %2.2fms, FPS: %2.2f; "
+                    "Render time: %2.2fms; "
+                    "Avg render time: %2.3fms (%gms/%g frames, %2.2f)\t\t",
+                AppState->FrameTime, 1000.0 / AppState->FrameTime,
+                AppState->RenderTime,
                 AppState->CumulativeRenderTime / AppState->FrameCount,
-                AppState->FrameCount * 1000 / AppState->CumulativeRenderTime,
-                AppState->FrameCount
+                AppState->CumulativeRenderTime, AppState->FrameCount,
+                AppState->FrameCount * 1000 / AppState->CumulativeRenderTime
             );
         }
         AppState->LogStart = LogCheckTime;
@@ -758,6 +802,8 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
 void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
 {
     double RenderTimeStart = Platform_GetTimeMillisec();
+    AppState->FrameTime = RenderTimeStart - AppState->FrameTimeStart;
+    AppState->FrameTimeStart = RenderTimeStart;
 
     renderer_context *RenderContext = &AppState->RenderContext;
     RenderContext->Width = Width;
@@ -767,6 +813,13 @@ void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
     App_SetBgColor(RenderContext, RGBColor(0, 0, 0));
 
     obj_model *Model = &AppState->Model;
+    float HalfWidth = (int)(RenderContext->Width/2);
+    float HalfHeight = (int)(RenderContext->Height/2);
+    float Depth = 100000000;
+    __m256 ScalesHuge = _mm256_set_ps(0, Depth, HalfHeight, HalfWidth, 0, Depth, HalfHeight, HalfWidth);
+    __m128 ScalesSmall = _mm256_castps256_ps128(ScalesHuge);
+    __m256 OffsetsHuge = _mm256_set_ps(0, 0, HalfHeight, HalfWidth, 0, 0, HalfHeight, HalfWidth);
+    __m128 OffsetsSmall = _mm256_castps256_ps128(OffsetsHuge);
     for (u32 i = 0; i < Model->FaceCount; i++)
     {
 #if 0
@@ -793,23 +846,42 @@ void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
             Model->Colors[i]
         );
 #else
-        Face CurrentFace = Model->Faces[i];
-        v3f Triangle[3];
-        for (int j = 0; j < 3; j++)
+        v3i TriangleVertices[4] AVX_ALIGN;
         {
-            Triangle[j] = (v3f) {
-                .x = Model->Vertices[CurrentFace.Index[j] - 1].x,
-                .y = Model->Vertices[CurrentFace.Index[j] - 1].y,
-                .z = Model->Vertices[CurrentFace.Index[j] - 1].z,
-            };
-            Triangle[j].x = (Triangle[j].x + 1.0) * RenderContext->Width * .5;
-            Triangle[j].y = (Triangle[j].y + 1.0) * RenderContext->Height * .5;
+#define GET_VERTEX(m, n) Model->Vertices[CurrentFace.Index[m] - 1].Index[n]
+            Face CurrentFace = Model->Faces[i];
+            __m256 Vertices01 = _mm256_set_ps(
+                0,
+                GET_VERTEX(1, 2),
+                GET_VERTEX(1, 1),
+                GET_VERTEX(1, 0),
+
+                0,
+                GET_VERTEX(0, 2),
+                GET_VERTEX(0, 1),
+                GET_VERTEX(0, 0)
+            );
+            __m128 Vertices2 = _mm_set_ps(
+                0,
+                GET_VERTEX(2, 2),
+                GET_VERTEX(2, 1),
+                GET_VERTEX(2, 0)
+            );
+#undef GET_VERTEX
+
+            Vertices01 = _mm256_fmadd_ps(Vertices01, ScalesHuge, OffsetsHuge);
+            Vertices2 = _mm_fmadd_ps(Vertices2, ScalesSmall, OffsetsSmall);
+            __m256i IntVertices01 = _mm256_cvtps_epi32(Vertices01);
+            __m128i IntVertices2 = _mm_cvtps_epi32(Vertices2);
+
+            _mm256_store_si256((__m256i *)TriangleVertices, IntVertices01);
+            _mm_store_si128((__m128i *)TriangleVertices + 2, IntVertices2);
         }
 
         App_Draw3DTriangle(RenderContext, 
-            Triangle[0], 
-            Triangle[1], 
-            Triangle[2], 
+            TriangleVertices[0], 
+            TriangleVertices[1], 
+            TriangleVertices[2], 
             Model->Colors[i]
         );
 #endif 

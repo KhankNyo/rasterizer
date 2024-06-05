@@ -411,7 +411,7 @@ static DWORD Win32_Main(LPVOID UserData)
     while (Win32_PollInputs(&State))
     {
         App_OnLoop(&Win32_AppState, &State);
-        if (ElapsedTime > MillisecPerFrame)
+        //if (ElapsedTime > MillisecPerFrame)
         {
             win32_paint_context Context = Win32_BeginPaint(MainWindow);
             if (NULL != Context.BitmapHandle && NULL != Context.BitmapData)
