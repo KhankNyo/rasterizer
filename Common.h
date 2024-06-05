@@ -5,10 +5,11 @@
 
 typedef uint8_t u8;
 typedef uint16_t u16;
-typedef int16_t i16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef size_t uSize;
+typedef int16_t i16;
+typedef int32_t i32;
 typedef intptr_t iSize;
 typedef uint8_t Bool8;
 #define false 0
@@ -38,7 +39,7 @@ typedef union v3i
     struct {
         int x, y, z, Dummy;
     };
-} Face, v3i;
+} face, v3i;
 typedef union v3f
 {
     float Index[4];
@@ -50,9 +51,18 @@ typedef union v3f
 typedef struct 
 {
     u32 FaceCount, FaceCapacity;
-    Face *Faces;
+    face *Faces;
     u32 *Colors;
-    Bool8 ColorIsValid;
+    Bool8 ColorsAreValid;
+#if defined(LTO_COMPILE_FLAG)
+    v3f *ComponentsVert;
+#else
+    u32 CompCount;
+    float *CompX;
+    float *CompY;
+    float *CompZ;
+#endif
+    Bool8 ComponentsAreValid;
 
     uSize VertexCount, VertexCapacity;
     v3f *Vertices;

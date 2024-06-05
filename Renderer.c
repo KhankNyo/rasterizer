@@ -15,6 +15,7 @@
 #define TRIANGLE_DBG 0
 #define SSE_ALIGN __attribute__((aligned(16)))
 #define AVX_ALIGN __attribute__((aligned(32)))
+#define ALIGN_UPTO(type, ptr, byte_boundary) (type *)(((uintptr_t)(ptr) + (byte_boundary)) & ~((byte_boundary) - 1))
 #define FORCE_INLINE __attribute__((always_inline)) inline
 
 typedef union v2i 
@@ -32,7 +33,7 @@ typedef union v2i
 static v3f V3f_Sub(v3f A, v3f B);
 static v3f V3f_NormalizedCrossProd(v3f A, v3f B);
 static v3f V3f_Normalize(v3f Vec);
-float V3f_DotProd(v3f A, v3f B);
+static float V3f_DotProd(v3f A, v3f B);
 
 
 static u32 RGBColor(u8 R, u8 G, u8 B)
@@ -388,13 +389,12 @@ static void App_SetBgColor(renderer_context *Context, u32 Color)
     u32 BufferSize = Context->Width*Context->Height;
     {
         u32 *Ptr = Context->Buffer;
-        u32 i = 0; 
-        while ((uintptr_t)Ptr % 32 && i < BufferSize)
+        int Residue = (((uintptr_t)Ptr + 32) & ~31) - (uintptr_t)Ptr;
+        for (int i = 0; i < Residue; i++)
         {
             *Ptr++ = Color;
-            i++;
         }
-        BufferSize -= i;
+        BufferSize -= Residue;
 
         __m256i ColorVec = _mm256_set1_epi32(Color);
         /* writing out of bound is ok on x86 if it's in page boundary */
@@ -419,13 +419,6 @@ static void App_SetBgColor(renderer_context *Context, u32 Color)
 
 
         float *Ptr = Context->ZBuffer;
-        uSize i = 0;
-        while ((uintptr_t)Ptr % 32 && i < BufferSize)
-        {
-            *Ptr++ = -FLT_MAX;
-            i++;
-        }
-        BufferSize -= i;
 
         __m256 MinVec = _mm256_set1_ps(-FLT_MAX);
         for (uSize i = 0; i < BufferSize; i += 8)
@@ -582,7 +575,7 @@ static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileS
                 i += 2;
                 break;
             }
-            Face Vec = { 0 };
+            face Vec = { 0 };
             while (i < FileSize && File[i] != '-' && !IN_RANGE('0', File[i], '9'))
             {
                 i++;
@@ -600,14 +593,18 @@ static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileS
                     i++;
             }
 
-            /* because the face capacity pointer contains the indeces of the face and color data, 
-             * divide capacity by 2 */
-            if (OutModel->FaceCount >= OutModel->FaceCapacity/2)
+            /* because the face capacity pointer contains the indeces of face, color and vertex data, 
+             * divide capacity by 3 */
+            if (OutModel->FaceCount >= OutModel->FaceCapacity/3)
             {
-                OutModel->FaceCapacity = OutModel->FaceCount*2 + 1024;
+                OutModel->FaceCapacity = OutModel->FaceCount*3 + 1024;
                 uSize CapacityInBytes = 
-                    OutModel->FaceCapacity/2 * sizeof(OutModel->Faces[0]) 
-                    + OutModel->FaceCapacity/2 * sizeof(OutModel->Colors[0]);
+                    OutModel->FaceCapacity/3 * sizeof(OutModel->Faces[0]) 
+#if defined(LTO_COMPILE_FLAG)
+                    + OutModel->FaceCapacity*3/3 * sizeof(OutModel->ComponentsVert[0]) 
+#endif
+                    + OutModel->FaceCapacity/3 * sizeof(OutModel->Colors[0]) 
+                    + 32*3;
 
                 void *Ptr = Platform_AllocateMemory(CapacityInBytes);
 
@@ -628,8 +625,30 @@ static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileS
         }
     }
 
-    OutModel->Colors = (u32 *)(OutModel->Faces + OutModel->FaceCount);
-    OutModel->ColorIsValid = false;
+#define GET_ALIGNED_PTR(type, prevptr, scale) (type *)(((uintptr_t)(prevptr + OutModel->FaceCount*scale) + 32) & ~31)
+
+    OutModel->Colors = GET_ALIGNED_PTR(u32, OutModel->Faces, 1);
+#if defined(LTO_COMPILE_FLAG)
+    OutModel->ComponentsVert = GET_ALIGNED_PTR(v3f, OutModel->Colors, 1);
+#else
+    u32 CompCount = OutModel->FaceCount*3;
+    if (CompCount > OutModel->CompCount)
+    {
+        u32 FloatCount = CompCount*3;
+        u32 SizeBytes = FloatCount * sizeof(OutModel->CompX[0]) + 32*3;
+        Platform_DeallocateMemory(OutModel->CompX);
+        float *Ptr = Platform_AllocateMemory(SizeBytes);
+        OutModel->CompX = Ptr;
+        OutModel->CompY = (float *)(((uintptr_t)(OutModel->CompX + CompCount) + 32) & ~31);
+        OutModel->CompZ = (float *)(((uintptr_t)(OutModel->CompY + CompCount) + 32) & ~31);
+
+        OutModel->CompCount = CompCount;
+    }
+#endif
+#undef GET_ALIGNED_PTR
+
+    OutModel->ComponentsAreValid = false;
+    OutModel->ColorsAreValid = false;
 }
 
 /* compute A - B */
@@ -697,24 +716,20 @@ static v3f V3f_Normalize(v3f Vec)
     return Ret;
 }
 
-float V3f_DotProd(v3f A, v3f B)
+static v3i V3f_ToV3i(v3f v)
 {
-#if 1
+    return (v3i) {
+        .x = v.x,
+        .y = v.y,
+        .z = v.z,
+    };
+}
+
+
+
+static float V3f_DotProd(v3f A, v3f B)
+{
     return A.x*B.x + A.y*B.y + A.z*B.z;
-#else
-    float Result;
-    __m128 VecA = _mm_load_ps(A.Index);
-    __m128 VecB = _mm_load_ps(B.Index);
-    __m128 ABx = _mm_mul_ss(VecA, VecB);
-    __m128 Ay = _mm_shuffle_ps(VecA, VecA, 1);
-    __m128 By = _mm_shuffle_ps(VecB, VecB, 1);
-    __m128 Az = _mm_shuffle_ps(VecA, VecA, 2);
-    __m128 Bz = _mm_shuffle_ps(VecB, VecB, 2);
-    __m128 ABxy = _mm_fmadd_ps(Ay, By, ABx);
-    __m128 DotProduct = _mm_fmadd_ps(Az, Bz, ABxy);
-    _mm_store_ss(&Result, DotProduct);
-    return Result;
-#endif
 }
 
 
@@ -729,7 +744,7 @@ app_state App_OnStartup(void)
         .LightDeltaX = 0.05,
 
         .LogStart = 0,
-        .LogInterval = 500,
+        .LogInterval = 100,
     };
 }
 
@@ -738,7 +753,7 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
     (void)PlatformState;
     if (Platform_GetTimeMillisec() - AppState->LightMoveStart > AppState->LightMoveDelta)
     {
-        AppState->Model.ColorIsValid = false;
+        AppState->Model.ColorsAreValid = false;
         AppState->Light.x += AppState->LightDeltaX;
         AppState->LightMoveStart = Platform_GetTimeMillisec();
         if (!IN_RANGE(-1.0, AppState->Light.x, 1.0))
@@ -746,7 +761,7 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
         AppState->Light = V3f_Normalize(AppState->Light);
     }
 
-    if (!AppState->Model.ColorIsValid)
+    if (!AppState->Model.ColorsAreValid)
     {
         obj_model *Model = &AppState->Model;
 
@@ -761,7 +776,6 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
                 V3f_Sub(Triangle[2], Triangle[0]),
                 V3f_Sub(Triangle[1], Triangle[0])
             );
-            //NormalToTriangle = V3f_Normalize(NormalToTriangle);
 
             float Intensity = V3f_DotProd(NormalToTriangle, AppState->Light);
             if (Intensity > 0)
@@ -777,7 +791,34 @@ void App_OnLoop(app_state *AppState, platform_state *PlatformState)
             }
         }
 
-        Model->ColorIsValid = true;
+        Model->ColorsAreValid = true;
+    }
+
+    if (!AppState->Model.ComponentsAreValid)
+    {
+        obj_model *Model = &AppState->Model;
+#if defined(LTO_COMPILE_FLAG)
+        for (u32 i = 0; i < Model->FaceCount; i++)
+        {
+            v3f v = Model->Vertices[Model->Faces[i].Index[0] - 1];
+            v3f v1 = Model->Vertices[Model->Faces[i].Index[1] - 1];
+            v3f v2 = Model->Vertices[Model->Faces[i].Index[2] - 1];
+            Model->ComponentsVert[i*3 + 0] = v;
+            Model->ComponentsVert[i*3 + 1] = v1;
+            Model->ComponentsVert[i*3 + 2] = v2;
+        }
+#else 
+        for (u32 i = 0; i < Model->FaceCount; i++)
+        {
+            for (int j = 0; j < 3; j++)
+            {
+                Model->CompX[i*3 + j] = Model->Vertices[Model->Faces[i].Index[j] - 1].x;
+                Model->CompY[i*3 + j] = Model->Vertices[Model->Faces[i].Index[j] - 1].y; 
+                Model->CompZ[i*3 + j] = Model->Vertices[Model->Faces[i].Index[j] - 1].z;
+            }
+        }
+#endif
+        Model->ComponentsAreValid = true;
     }
 
     double LogCheckTime = Platform_GetTimeMillisec();
@@ -815,77 +856,164 @@ void App_OnPaint(app_state *AppState, u32 *Buffer, u32 Width, u32 Height)
     obj_model *Model = &AppState->Model;
     float HalfWidth = (int)(RenderContext->Width/2);
     float HalfHeight = (int)(RenderContext->Height/2);
-    float Depth = 100000000;
+    float Depth = 10000;
+#if defined(LTO_COMPILE_FLAG)
     __m256 ScalesHuge = _mm256_set_ps(0, Depth, HalfHeight, HalfWidth, 0, Depth, HalfHeight, HalfWidth);
-    __m128 ScalesSmall = _mm256_castps256_ps128(ScalesHuge);
-    __m256 OffsetsHuge = _mm256_set_ps(0, 0, HalfHeight, HalfWidth, 0, 0, HalfHeight, HalfWidth);
-    __m128 OffsetsSmall = _mm256_castps256_ps128(OffsetsHuge);
-    for (u32 i = 0; i < Model->FaceCount; i++)
+    __m256 OffsetsHuge = _mm256_set_ps(0.5, 0.5, 0.5 + HalfHeight, 0.5 + HalfWidth, 0.5, 0.5, 0.5 + HalfHeight, 0.5 + HalfWidth);
+#define FACE_PER_LOOP 2
+    for (u32 i = 0; i < Model->FaceCount/FACE_PER_LOOP; i++)
     {
-#if 0
-        /* black face culling */
-        if (0 == Model->Colors[i])
-            continue;
-
-        Face CurrentFace = Model->Faces[i];
-        v2i Triangle[3];
-        for (int j = 0; j < 3; j++)
+        v3i TriangleVertices[3*FACE_PER_LOOP] AVX_ALIGN;
         {
-            v3f v0 = Model->Vertices[CurrentFace.Index[j] - 1];
-            int x0 = (v0.x + 1.0) * RenderContext->Width * .5;
-            int y0 = (v0.y + 1.0) * RenderContext->Height * .5;
-            Triangle[j] = (v2i) {
-                .x = x0, .y = y0,
-            };
+            float *Ptr = (float *)Model->ComponentsVert + i*(12*FACE_PER_LOOP);
+            __m256 v1 = _mm256_load_ps(Ptr + 0);
+            __m256 v12 = _mm256_load_ps(Ptr + 8);
+            __m256 v2 = _mm256_load_ps(Ptr + 16);
+
+            v1 = _mm256_fmadd_ps(v1, ScalesHuge, OffsetsHuge);
+            v12 = _mm256_fmadd_ps(v12, ScalesHuge, OffsetsHuge);
+            v2 = _mm256_fmadd_ps(v2, ScalesHuge, OffsetsHuge);
+
+            __m256i v1i = _mm256_cvtps_epi32(v1);
+            __m256i v12i = _mm256_cvtps_epi32(v12);
+            __m256i v2i = _mm256_cvtps_epi32(v2);
+
+            _mm256_store_si256((__m256i *)TriangleVertices + 0, v1i);
+            _mm256_store_si256((__m256i *)TriangleVertices + 1, v12i);
+            _mm256_store_si256((__m256i *)TriangleVertices + 2, v2i);
         }
 
-        App_Draw2DTriangle(RenderContext, 
-            Triangle[0], 
-            Triangle[1], 
-            Triangle[2], 
-            Model->Colors[i]
-        );
-#else
-        v3i TriangleVertices[4] AVX_ALIGN;
+#pragma GCC unroll 2
+        for (int j = 0; j < FACE_PER_LOOP; j++)
         {
-#define GET_VERTEX(m, n) Model->Vertices[CurrentFace.Index[m] - 1].Index[n]
-            Face CurrentFace = Model->Faces[i];
-            __m256 Vertices01 = _mm256_set_ps(
-                0,
-                GET_VERTEX(1, 2),
-                GET_VERTEX(1, 1),
-                GET_VERTEX(1, 0),
-
-                0,
-                GET_VERTEX(0, 2),
-                GET_VERTEX(0, 1),
-                GET_VERTEX(0, 0)
+            App_Draw3DTriangle(RenderContext, 
+                TriangleVertices[j*3 + 0], 
+                TriangleVertices[j*3 + 1],
+                TriangleVertices[j*3 + 2], 
+                Model->Colors[i*FACE_PER_LOOP + j]
             );
-            __m128 Vertices2 = _mm_set_ps(
-                0,
-                GET_VERTEX(2, 2),
-                GET_VERTEX(2, 1),
-                GET_VERTEX(2, 0)
-            );
-#undef GET_VERTEX
-
-            Vertices01 = _mm256_fmadd_ps(Vertices01, ScalesHuge, OffsetsHuge);
-            Vertices2 = _mm_fmadd_ps(Vertices2, ScalesSmall, OffsetsSmall);
-            __m256i IntVertices01 = _mm256_cvtps_epi32(Vertices01);
-            __m128i IntVertices2 = _mm_cvtps_epi32(Vertices2);
-
-            _mm256_store_si256((__m256i *)TriangleVertices, IntVertices01);
-            _mm_store_si128((__m128i *)TriangleVertices + 2, IntVertices2);
         }
-
-        App_Draw3DTriangle(RenderContext, 
-            TriangleVertices[0], 
-            TriangleVertices[1], 
-            TriangleVertices[2], 
-            Model->Colors[i]
-        );
-#endif 
     }
+
+    if (Model->FaceCount % 2)
+    {
+        v3i TriangleVertices[3] = {
+            [0] = V3f_ToV3i(Model->ComponentsVert[Model->FaceCount - 3]),
+            [1] = V3f_ToV3i(Model->ComponentsVert[Model->FaceCount - 2]),
+            [2] = V3f_ToV3i(Model->ComponentsVert[Model->FaceCount - 1])
+        };
+        App_Draw3DTriangle(RenderContext, 
+            TriangleVertices[0],
+            TriangleVertices[1],
+            TriangleVertices[2], 
+            Model->Colors[Model->FaceCount - 1]
+        );
+    }
+#else
+    __m256 XOffset = _mm256_set1_ps(HalfWidth + .5);
+    __m256 YOffset = _mm256_set1_ps(HalfHeight + .5);
+    __m256 ZOffset = _mm256_set1_ps(.5);
+    __m256 XScale = _mm256_set1_ps(HalfWidth);
+    __m256 YScale = _mm256_set1_ps(HalfHeight);
+    __m256 ZScale = _mm256_set1_ps(Depth);
+    float *XPtr = Model->CompX;
+    float *YPtr = Model->CompY;
+    float *ZPtr = Model->CompZ;
+    u32 Count = Model->FaceCount / 8;
+    int Remain = Model->FaceCount % 8;
+    for (u32 i = 0; i < Count; i++)
+    {
+        __m256 x1 = _mm256_load_ps(XPtr);
+        __m256 x12 = _mm256_load_ps(XPtr + 8);
+        __m256 x2 = _mm256_load_ps(XPtr + 16);
+
+        __m256 y1 = _mm256_load_ps(YPtr);
+        __m256 y12 = _mm256_load_ps(YPtr + 8);
+        __m256 y2 = _mm256_load_ps(YPtr + 16);
+
+        __m256 z1 = _mm256_load_ps(ZPtr);
+        __m256 z12 = _mm256_load_ps(ZPtr + 8);
+        __m256 z2 = _mm256_load_ps(ZPtr + 16);
+        XPtr += 24;
+        YPtr += 24;
+        ZPtr += 24;
+
+        x1 = _mm256_fmadd_ps(x1, XScale, XOffset);
+        x12 = _mm256_fmadd_ps(x12, XScale, XOffset);
+        x2 = _mm256_fmadd_ps(x2, XScale, XOffset);
+
+        y1 = _mm256_fmadd_ps(y1, YScale, YOffset);
+        y12 = _mm256_fmadd_ps(y12, YScale, YOffset);
+        y2 = _mm256_fmadd_ps(y2, YScale, YOffset);
+
+        z1 = _mm256_fmadd_ps(z1, ZScale, ZOffset);
+        z12 = _mm256_fmadd_ps(z12, ZScale, ZOffset);
+        z2 = _mm256_fmadd_ps(z2, ZScale, ZOffset);
+
+        __m256i x1i = _mm256_cvtps_epi32(x1);
+        __m256i x12i = _mm256_cvtps_epi32(x12);
+        __m256i x2i = _mm256_cvtps_epi32(x2);
+
+        __m256i y1i = _mm256_cvtps_epi32(y1);
+        __m256i y12i = _mm256_cvtps_epi32(y12);
+        __m256i y2i = _mm256_cvtps_epi32(y2);
+
+        __m256i z1i = _mm256_cvtps_epi32(z1);
+        __m256i z12i = _mm256_cvtps_epi32(z12);
+        __m256i z2i = _mm256_cvtps_epi32(z2);
+
+        i32 X[24] AVX_ALIGN;
+        i32 Y[24] AVX_ALIGN;
+        i32 Z[24] AVX_ALIGN;
+        _mm256_store_si256((__m256i *)X + 0, x1i);
+        _mm256_store_si256((__m256i *)X + 1, x12i);
+        _mm256_store_si256((__m256i *)X + 2, x2i);
+
+        _mm256_store_si256((__m256i *)Y + 0, y1i);
+        _mm256_store_si256((__m256i *)Y + 1, y12i);
+        _mm256_store_si256((__m256i *)Y + 2, y2i);
+
+        _mm256_store_si256((__m256i *)Z + 0, z1i);
+        _mm256_store_si256((__m256i *)Z + 1, z12i);
+        _mm256_store_si256((__m256i *)Z + 2, z2i);
+#pragma GCC unroll 8
+        for (int j = 0; j < 8; j++)
+        {
+            v3i Vertices[3];
+#pragma GCC unroll 3
+            for (int k = 0; k < 3; k++)
+            {
+                Vertices[k].x = X[j*3 + k];
+                Vertices[k].y = Y[j*3 + k];
+                Vertices[k].z = Z[j*3 + k];
+            }
+            App_Draw3DTriangle(RenderContext, Vertices[0], Vertices[1], Vertices[2], Model->Colors[i*8 + j]);
+        }
+    }
+
+    for (int i = 0; i < Remain; i++)
+    {
+        v3i Vertices[3];
+#pragma GCC unroll 3
+        for (int k = 0; k < 3; k++)
+        {
+            Vertices[k].x = XPtr[k];
+            Vertices[k].y = YPtr[k];
+            Vertices[k].z = ZPtr[k];
+        }
+        XPtr += 3;
+        YPtr += 3;
+        ZPtr += 3;
+        App_Draw3DTriangle(
+            RenderContext, 
+            Vertices[0], 
+            Vertices[1], 
+            Vertices[2], 
+            Model->Colors[Count*8 + i]
+        );
+    }
+#endif
+
 
     RenderContext->Width = 0;;
     RenderContext->Height = 0;
