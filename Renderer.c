@@ -680,40 +680,25 @@ static v3f V3f_NormalizedCrossProd(v3f A, v3f B)
         _mm_mul_ps(A_zxy, B_yzx)
     );
 
-    __m128 v2 = _mm_mul_ps(CrossProduct, CrossProduct); /* CrossProd vec^2 */
-    __m128 x = _mm_shuffle_ps(CrossProduct, CrossProduct, 0x00);    /* distribute x */
-    __m128 y = _mm_shuffle_ps(CrossProduct, CrossProduct, 0x55);    /* distribute y */
-    __m128 z2 = _mm_shuffle_ps(v2, v2, 0xAA);                       /* get z^2 from crossprod */
-    __m128 Tmp = _mm_fmadd_ps(x, x, z2);                            /* sum x^2 and z^2 */
-    __m128 Sum = _mm_fmadd_ps(y, y, Tmp);                           /* sum that with y^2 */
-
-    __m128 RecipMag = _mm_rsqrt_ps(Sum);
-    __m128 ResultVec = _mm_mul_ps(CrossProduct, RecipMag);
-
-    v3f Result;
-    _mm_store_ps(Result.Index, ResultVec);
-    return Result;
+    __m128 MagSq = _mm_dp_ps(CrossProduct, CrossProduct, 0x7F); /* [|CrossProd|^2] */
+    __m128 RecipMag = _mm_rsqrt_ps(MagSq);              /* [1/|CrossProd|] */
+    __m128 Result = _mm_mul_ps(CrossProduct, RecipMag);
+    v3f Normal;
+    _mm_store_ps(Normal.Index, Result);
+    return Normal;
 }
 
 static v3f V3f_Normalize(v3f Vec)
 {
-    __m128 v = _mm_load_ps(Vec.Index);                  /* [x,            y,          z,    0] */
+    __m128 v = _mm_load_ps(Vec.Index);                  /* [x,            y,          z,        0] */
 
     /* compute Mag */
-    __m128 v2 = _mm_mul_ps(v, v);                       /* [x2,           y2,         z2,   0] */
-
-    __m128 x2 = _mm_shuffle_ps(v2, v2, 0x00);           /* [x2,           x2,         x2,   x2] */
-    __m128 y2 = _mm_shuffle_ps(v2, v2, 0x55);           /* [y2,           y2,         y2,   y2] */
-    __m128 z2 = _mm_shuffle_ps(v2, v2, 0xAA);           /* [z2,           z2,         z2,   z2] */
-    __m128 Tmp = _mm_add_ps(x2, y2);
-    __m128 Sum = _mm_add_ps(Tmp, z2);                   /* [Sum,         Sum,        Sum,  Sum] */
-
-    __m128 InvSqrt = _mm_rsqrt_ps(Sum);                 /* [Ret,         Ret,        Ret,  Ret] = 1/sqrt(Sum) */
-    __m128 Normal = _mm_mul_ps(v, InvSqrt);
-
-    v3f Ret;
-    _mm_store_ps(Ret.Index, Normal);
-    return Ret;
+    __m128 MagSq = _mm_dp_ps(v, v, 0x7F);               /* [|v|^2,    |v|^2,      |v|^2,    |v|^2]*/
+    __m128 RecipMag = _mm_rsqrt_ps(MagSq);              /* [1/|v|     1/|v|,      1/|v|,    1/|v|]*/
+    __m128 Result = _mm_mul_ps(v, RecipMag);
+    v3f Normal;
+    _mm_store_ps(Normal.Index, Result);
+    return Normal;
 }
 
 static v3i V3f_ToV3i(v3f v)
@@ -729,7 +714,12 @@ static v3i V3f_ToV3i(v3f v)
 
 static float V3f_DotProd(v3f A, v3f B)
 {
-    return A.x*B.x + A.y*B.y + A.z*B.z;
+    __m128 VecA = _mm_load_ps(A.Index);
+    __m128 VecB = _mm_load_ps(B.Index);
+    __m128 Result = _mm_dp_ps(VecA, VecB, 0x71); /* bitmask: does dp on first 3 elems, store in elem index 0 only */
+    float Ret;
+    _mm_store_ss(&Ret, Result);
+    return Ret;
 }
 
 
