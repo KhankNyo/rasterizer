@@ -15,7 +15,6 @@
 #define TRIANGLE_DBG 0
 #define SSE_ALIGN __attribute__((aligned(16)))
 #define AVX_ALIGN __attribute__((aligned(32)))
-#define ALIGN_UPTO(type, ptr, byte_boundary) (type *)(((uintptr_t)(ptr) + (byte_boundary)) & ~((byte_boundary) - 1))
 #define FORCE_INLINE __attribute__((always_inline)) inline
 
 typedef union v2i 
@@ -430,86 +429,147 @@ static void App_SetBgColor(renderer_context *Context, u32 Color)
 }
 
 
-static int App_ParseInt(const char *Str, int Len, int *OutIndex)
+
+
+typedef struct parser 
 {
-    int Ret = 0;
-    if (Len == 0)
-    {
-        *OutIndex = 0;
-        return 0;
-    }
+    const char *Ptr;
+    uSize i, Len;
+} parser;
 
-
-    Bool8 Neg = Str[0] == '-';
-    int i = Neg;
-    while (i < Len && IN_RANGE('0', Str[i], '9'))
+static Bool8 Parser_ConsumeIfMatch(parser *Parser, char Ch)
+{
+    if (Parser->i < Parser->Len)
     {
-        Ret *= 10;
-        Ret += Str[i] - '0';
-        i++;
+        Bool8 Match = (Parser->Ptr[Parser->i] == Ch);
+        Parser->i += Match;
+        return Match;
     }
-    *OutIndex = i;
-    return Neg? -Ret : Ret;
+    return false;
 }
 
-static float App_ParseFloat(const char *Str, int Len, int *OutIndex)
+static void Parser_SkipSpace(parser *Parser)
 {
-    float Ret = 0;
-    if (Len == 0)
+    while (Parser->i < Parser->Len)
     {
-        *OutIndex = 0;
-        return 0;
-    }
-
-    Bool8 Neg = Str[0] == '-';
-    int i = Neg;
-    while (i < Len && IN_RANGE('0', Str[i], '9'))
-    {
-        Ret *= 10;
-        Ret += Str[i] - '0';
-        i++;
-    }
-
-    if (i < Len && '.' == Str[i])
-    {
-        i++; /* skip '.' */
-        float Fraction = 0;
-        float Power = 1;
-        while (i < Len && IN_RANGE('0', Str[i], '9'))
+        switch (Parser->Ptr[Parser->i])
         {
-            Fraction *= 10;
-            Power *= 10;
-            Fraction += Str[i] - '0';
-            i++;
+        case '#': /* # python style comment */
+        {
+            do {
+                Parser->i++;
+                if (Parser->i >= Parser->Len)
+                    return;
+            } while (Parser->Ptr[Parser->i] != '\n');
+            Parser->i++; /* skip newline */
+        } break;
+
+        case '\t': /* space */
+        case '\n':
+        case '\r':
+        case ' ':
+        {
+            Parser->i++;
+        } break;
+        default: return;
+        }
+    }
+}
+
+static int Parser_ConsumeInt(parser *Parser)
+{
+    int Result = 0;
+    Bool8 Neg = Parser_ConsumeIfMatch(Parser, '-');
+    while (IN_RANGE('0', Parser->Ptr[Parser->i], '9'))
+    {
+        Result *= 10;
+        Result += Parser->Ptr[Parser->i] - '0';
+        Parser->i++;
+    }
+
+    return Neg? 
+        -Result : Result;
+}
+
+static float Parser_ConsumeFloat(parser *Parser)
+{
+    Bool8 Neg = Parser_ConsumeIfMatch(Parser, '-');
+    float Result = Parser_ConsumeInt(Parser);
+    if (Parser_ConsumeIfMatch(Parser, '.'))
+    {
+        float Decimal = 0;
+        float Powers = 1;
+        while (IN_RANGE('0', Parser->Ptr[Parser->i], '9'))
+        {
+            Decimal *= 10;
+            Powers *= 10;
+            Decimal += Parser->Ptr[Parser->i] - '0';
+            Parser->i++;
+        }
+        Result += Decimal / Powers;
+    }
+
+    if (Parser_ConsumeIfMatch(Parser, 'e') 
+    || Parser_ConsumeIfMatch(Parser, 'E'))
+    {
+        float Exponent = Parser_ConsumeInt(Parser);
+        Result *= powf(10.0f, Exponent);
+    }
+    return Neg? 
+        -Result : Result;
+}
+
+static void Model_PushFace(obj_model *Model, const face *Face)
+{
+    int FaceMember = 3;
+    if (Model->FaceCount >= Model->FaceCapacity/FaceMember)
+    {
+        uSize NewCapacity = (Model->FaceCount*2 + 1024)*FaceMember;
+        uSize NewCapacityInBytes = 
+            FaceMember * NewCapacity * (
+                sizeof(face) 
+#if defined(LTO_COMPILE_FLAG)
+                + 3*(3*sizeof(float))  /* the component member itself has 3 elements, 
+                                            and each 3 elements are the coords of 1 face, DO NOT refactor */
+#else
+                + 3*sizeof(v3f)
+#endif
+                + sizeof(u32)
+        ) + 32 * (5); /* alignment for 5 total arrays */
+
+        void *Ptr = Platform_AllocateMemory(NewCapacityInBytes);
+
+        if (Model->Faces)
+        {
+            memcpy(Ptr, Model->Faces, Model->FaceCount * sizeof(face));
+            Platform_DeallocateMemory(Model->Faces);
         }
 
-        Ret += Fraction / Power;
+        Model->FaceCapacity = NewCapacity;
+        Model->Faces = Ptr;
     }
 
-    if (i < Len && 
-    ('e' == Str[i] || 'E' == Str[i]))
-    {
-        i++; /* skip 'e'/'E' */
-        int ExpLen;
-        int Exponent = App_ParseInt(&Str[i], Len, &ExpLen);
-        Ret *= pow(10, Exponent);
-        i += ExpLen;
-    }
-
-    *OutIndex = i;
-    return Neg? -Ret : Ret;
+    Model->Faces[Model->FaceCount++] = *Face;
 }
 
-
-static iSize App_SkipSpace(const char *Str, iSize Len)
+static void Model_PushVertex(obj_model *Model, const v3f *Vertex)
 {
-    iSize i = 0;
-    while (i < Len && 
-    (Str[i] == ' ' || Str[i] == '\t' || Str[i] == '\n' || Str[i] == '\r'))
+    if (Model->VertexCount >= Model->VertexCapacity)
     {
-        i++;
+        uSize NewCapacity = Model->VertexCount*2 + 1024;
+        void *Ptr = Platform_AllocateArray(v3f, NewCapacity);
+
+        if (Model->Vertices)
+        {
+            memcpy(Ptr, Model->Vertices, Model->VertexCount*sizeof(v3f));
+            Platform_DeallocateMemory(Model->Vertices);
+        }
+
+        Model->VertexCapacity = NewCapacity;
+        Model->Vertices = Ptr;
     }
-    return i;
+
+    Model->Vertices[Model->VertexCount++] = *Vertex;
 }
 
 static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileSize)
@@ -517,111 +577,67 @@ static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileS
     OutModel->VertexCount = 0;
     OutModel->FaceCount = 0;
 
-    iSize i = 0; 
-    while (i < FileSize)
+    parser Parser = {
+        .i = 0,
+        .Len = FileSize,
+        .Ptr = File,
+    };
+    while (Parser.i < Parser.Len)
     {
-        switch (File[i])
+        Parser_SkipSpace(&Parser);
+        if (Parser_ConsumeIfMatch(&Parser, 'v'))
         {
-        case '#':
-        {
-            while (i < FileSize && File[i] != '\n')
-                i++;
-        } break;
-        case 'v':
-        {
-            /* only care about 'v' */
-            if (i + 1 < FileSize && File[i + 1] != ' ')
+            if (Parser_ConsumeIfMatch(&Parser, 't')) /* 'vt' */
             {
-                i += 2;
-                break;
+                /* skip to newline, don't care about texture data for now */
+                while (Parser.i < Parser.Len && Parser.Ptr[Parser.i] != '\n')
+                    Parser.i++;
             }
-
-            v3f Vec = { 0 };
-            while (i < FileSize && File[i] != '-' && !IN_RANGE('0', File[i], '9'))
+            else if (Parser_ConsumeIfMatch(&Parser, 'n')) /* 'vn' */
             {
-                i++;
+                while (Parser.i < Parser.Len && Parser.Ptr[Parser.i] != '\n')
+                    Parser.i++;
             }
-            for (int j = 0; j < 3 && i < FileSize; j++)
+            else /* 'v' */
             {
-                i += App_SkipSpace(File + i, FileSize - i);
-
-                int Len;
-                Vec.Index[j] = App_ParseFloat(File + i, FileSize - i, &Len);
-                if (Vec.Index[j] > 1)
+                v3f v = { 0 };
+                for (int i = 0; i < 3; i++)
                 {
-                    i += Len - 1 + 1.0;
+                    Parser_SkipSpace(&Parser);
+                    v.Index[i] = Parser_ConsumeFloat(&Parser);
                 }
-                i += Len;
+                Model_PushVertex(OutModel, &v);
             }
-            if (OutModel->VertexCount >= OutModel->VertexCapacity)
-            {
-                OutModel->VertexCapacity = OutModel->VertexCount*2 + 1024;
-                void *Ptr = Platform_AllocateArray(*OutModel->Vertices, OutModel->VertexCapacity);
-
-                if (OutModel->Vertices)
-                {
-                    memcpy(Ptr, OutModel->Vertices, OutModel->VertexCount * sizeof(OutModel->Vertices[0]));
-                    Platform_DeallocateMemory(OutModel->Vertices);
-                }
-                OutModel->Vertices = Ptr;
-            }
-
-            OutModel->Vertices[OutModel->VertexCount++] = Vec;
-        } break;
-        case 'f':
+        }
+        else if (Parser_ConsumeIfMatch(&Parser, 'f'))
         {
-            if (i + 1 < FileSize && File[i + 1] != ' ')
+            face Face = { 0 };
+            for (int i = 0; i < 3; i++)
             {
-                i += 2;
-                break;
-            }
-            face Vec = { 0 };
-            while (i < FileSize && File[i] != '-' && !IN_RANGE('0', File[i], '9'))
-            {
-                i++;
-            }
-            for (int j = 0; j < 3 && i < FileSize; j++)
-            {
-                i += App_SkipSpace(File + i, FileSize - i);
-
-                int Len;
-                Vec.Index[j] = App_ParseInt(File + i, FileSize - i, &Len);
-                i += Len;
-
-                /* skip unneeded entries */
-                while (i < FileSize && (File[i] != ' ' && File[i] != '\n'))
-                    i++;
-            }
-
-            /* because the face capacity pointer contains the indeces of face, color and vertex data, 
-             * divide capacity by 3 */
-            if (OutModel->FaceCount >= OutModel->FaceCapacity/3)
-            {
-                OutModel->FaceCapacity = OutModel->FaceCount*3 + 1024;
-                uSize CapacityInBytes = 
-                    OutModel->FaceCapacity/3 * sizeof(OutModel->Faces[0]) 
-#if defined(LTO_COMPILE_FLAG)
-                    + OutModel->FaceCapacity*3/3 * sizeof(OutModel->ComponentsVert[0]) 
-#endif
-                    + OutModel->FaceCapacity/3 * sizeof(OutModel->Colors[0]) 
-                    + 32*3;
-
-                void *Ptr = Platform_AllocateMemory(CapacityInBytes);
-
-                if (OutModel->Faces)
+                Parser_SkipSpace(&Parser);
+                int VertexIndex = Parser_ConsumeInt(&Parser);
+                int TextureIndex = -1;
+                if (Parser_ConsumeIfMatch(&Parser, '/') 
+                && IN_RANGE('0', Parser.Ptr[Parser.i], '9'))
                 {
-                    memcpy(Ptr, OutModel->Faces, OutModel->FaceCount * sizeof(OutModel->Faces[0]));
-                    Platform_DeallocateMemory(OutModel->Faces);
+                    TextureIndex = Parser_ConsumeInt(&Parser);
                 }
-                OutModel->Faces = Ptr;
+                int NormalIndex = -1;
+                if (Parser_ConsumeIfMatch(&Parser, '/'))
+                {
+                    NormalIndex = Parser_ConsumeInt(&Parser);
+                }
+
+                Face.Index[i] = VertexIndex;
+                Face.Texture[i] = TextureIndex;
+                Face.Normal[i] = NormalIndex;
             }
 
-            OutModel->Faces[OutModel->FaceCount++] = Vec;
-        } break;
-        default: 
+            Model_PushFace(OutModel, &Face);
+        }
+        else
         {
-            i++;
-        } break;
+            Parser.i++;
         }
     }
 
@@ -631,25 +647,19 @@ static void App_ParseObjModel(obj_model *OutModel, const char *File, iSize FileS
 #if defined(LTO_COMPILE_FLAG)
     OutModel->ComponentsVert = GET_ALIGNED_PTR(v3f, OutModel->Colors, 1);
 #else
-    u32 CompCount = OutModel->FaceCount*3;
-    if (CompCount > OutModel->CompCount)
-    {
-        u32 FloatCount = CompCount*3;
-        u32 SizeBytes = FloatCount * sizeof(OutModel->CompX[0]) + 32*3;
-        Platform_DeallocateMemory(OutModel->CompX);
-        float *Ptr = Platform_AllocateMemory(SizeBytes);
-        OutModel->CompX = Ptr;
-        OutModel->CompY = (float *)(((uintptr_t)(OutModel->CompX + CompCount) + 32) & ~31);
-        OutModel->CompZ = (float *)(((uintptr_t)(OutModel->CompY + CompCount) + 32) & ~31);
-
-        OutModel->CompCount = CompCount;
-    }
+    OutModel->CompCount = OutModel->FaceCount*3;
+    OutModel->CompX = GET_ALIGNED_PTR(float, OutModel->Colors, 1);
+    OutModel->CompY = GET_ALIGNED_PTR(float, OutModel->CompX, 3);
+    OutModel->CompZ = GET_ALIGNED_PTR(float, OutModel->CompY, 3);
 #endif
 #undef GET_ALIGNED_PTR
 
     OutModel->ComponentsAreValid = false;
     OutModel->ColorsAreValid = false;
 }
+
+
+
 
 /* compute A - B */
 static v3f V3f_Sub(v3f A, v3f B)

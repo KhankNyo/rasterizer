@@ -33,14 +33,20 @@ void *Platform_AllocateMemory(uSize SizeBytes);
     Platform_AllocateMemory((member_count) * sizeof(member_type))
 
 
-typedef union v3i
+typedef union
 {
     int Index[4];
     struct {
         int x, y, z, Dummy;
     };
-} face, v3i;
-typedef union v3f
+} v3i;
+typedef struct 
+{
+    int Index[3];
+    int Texture[3];
+    int Normal[3];
+} face;
+typedef union 
 {
     float Index[4];
     struct {
